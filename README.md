@@ -4,15 +4,15 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/adehikmatfr/go-pkg.svg)](https://pkg.go.dev/github.com/adehikmatfr/go-pkg)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Koleksi package Go serbaguna (personal utility library), mirip gaya `golang.org/x/...` — satu module, banyak subpackage independen.
+A general-purpose Go utility library, in the style of `golang.org/x/...` — one module, many independent subpackages.
 
-## Instalasi
+## Install
 
 ```bash
 go get github.com/adehikmatfr/go-pkg@latest
 ```
 
-Setiap subpackage diimpor terpisah sesuai kebutuhan, misalnya:
+Each subpackage is imported individually as needed, e.g.:
 
 ```go
 import (
@@ -21,28 +21,28 @@ import (
 )
 ```
 
-## Struktur
+## Layout
 
-Setiap utility hidup di subdirektori sendiri sebagai package terpisah:
+Each utility lives in its own subdirectory as a separate package:
 
 ```text
 go-pkg/
 ├── go.mod
-├── env/       — baca env var (APP_ENV, bool/int helpers)
-├── logger/    — global zerolog logger, split stdout/stderr per level
-├── jwt/       — issue & parse JWT HS256 (subject + role claim)
-├── config/    — load YAML/JSON config per environment (github.com/kkyr/fig)
-├── tracer/    — OpenTelemetry TracerProvider (OTLP/HTTP), sampling ratio configurable
+├── env/       — read env vars (APP_ENV, bool/int helpers)
+├── logger/    — global zerolog logger, split stdout/stderr by level
+├── jwt/       — issue & parse HS256 JWTs (subject + role claim)
+├── config/    — load per-environment YAML/JSON config (github.com/kkyr/fig)
+├── tracer/    — OpenTelemetry TracerProvider (OTLP/HTTP), configurable sample ratio
 ├── postgres/  — pooled *sql.DB (lib/pq)
 ├── client/    — HTTP REST client (retry/backoff, proxy) & gRPC client (TLS-aware)
 ├── kafka/     — consumer-group listener + sync producer (IBM/sarama)
 ├── redis/     — context-aware get/set/delete wrapper (go-redis/v8)
-└── parser/fiber/ — pagination request + standard JSON response envelope untuk Fiber
+└── parser/fiber/ — pagination request + standard JSON response envelope for Fiber
 ```
 
-## Contoh pakai
+## Usage
 
-Semua tipe publik yang mewakili sebuah "service" (bukan DTO/config) diekspos sebagai interface, jadi bisa di-mock di test milik konsumen — lihat `*_test.go` masing-masing package untuk contoh pola mock-nya.
+Every public type that represents a "service" (as opposed to a DTO/config) is exposed as an interface, so it can be mocked in the consumer's own tests — see each package's `*_test.go` for an example of the mocking pattern.
 
 ### env
 
@@ -138,24 +138,24 @@ resp.CreateResponse(user, "ok", nil)
 return fiberparser.ResponseJSON(c, resp)
 ```
 
-## Konvensi
+## Conventions
 
-- Satu folder = satu package, nama folder = nama package.
-- Hanya export (huruf kapital) yang memang perlu dipakai dari luar.
-- Setiap package punya file `_test.go` sendiri.
-- Import dari luar module ini: `github.com/adehikmatfr/go-pkg/<namapackage>`.
+- One folder = one package, folder name = package name.
+- Only export (capitalized) what actually needs to be used from outside.
+- Every package has its own `_test.go` file.
+- Import from outside this module as: `github.com/adehikmatfr/go-pkg/<packagename>`.
 
-## Menambah package baru
+## Adding a new package
 
 ```bash
-mkdir <namapackage>
-# buat <namapackage>/<namapackage>.go dengan `package <namapackage>`
+mkdir <packagename>
+# create <packagename>/<packagename>.go with `package <packagename>`
 go test ./...
 ```
 
-## Rilis
+## Releasing
 
-Versi mengikuti [semantic versioning](https://semver.org/). Untuk merilis versi baru:
+Versions follow [semantic versioning](https://semver.org/). To cut a new release:
 
 ```bash
 go mod tidy
