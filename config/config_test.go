@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -31,7 +32,7 @@ func TestResolveFileName(t *testing.T) {
 
 func TestResolveFileNameNotFound(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := resolveFileName(dir, "app", "local"); err != ErrConfigNotFound {
+	if _, err := resolveFileName(dir, "app", "local"); !errors.Is(err, ErrConfigNotFound) {
 		t.Errorf("resolveFileName() error = %v, want %v", err, ErrConfigNotFound)
 	}
 }

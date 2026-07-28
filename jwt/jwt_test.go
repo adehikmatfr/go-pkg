@@ -1,6 +1,7 @@
 package jwt
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -57,7 +58,7 @@ func TestSignerParseExpiredToken(t *testing.T) {
 	}
 	time.Sleep(10 * time.Millisecond)
 
-	if _, err := signer.Parse(token); err != ErrInvalidToken {
+	if _, err := signer.Parse(token); !errors.Is(err, ErrInvalidToken) {
 		t.Errorf("Parse() expired token error = %v, want %v", err, ErrInvalidToken)
 	}
 }
@@ -67,14 +68,14 @@ func TestSignerParseWrongSecret(t *testing.T) {
 	token, _ := signer.Generate("user-1", "admin", time.Minute)
 
 	other, _ := NewSigner("secret-b")
-	if _, err := other.Parse(token); err != ErrInvalidToken {
+	if _, err := other.Parse(token); !errors.Is(err, ErrInvalidToken) {
 		t.Errorf("Parse() with wrong secret error = %v, want %v", err, ErrInvalidToken)
 	}
 }
 
 func TestSignerParseMalformedToken(t *testing.T) {
 	signer, _ := NewSigner("secret")
-	if _, err := signer.Parse("not-a-jwt"); err != ErrInvalidToken {
+	if _, err := signer.Parse("not-a-jwt"); !errors.Is(err, ErrInvalidToken) {
 		t.Errorf("Parse() malformed token error = %v, want %v", err, ErrInvalidToken)
 	}
 }
@@ -96,7 +97,7 @@ func TestSignerRejectsNonHMACAlg(t *testing.T) {
 	}
 
 	signer, _ := NewSigner("secret")
-	if _, err := signer.Parse(tokenString); err != ErrInvalidToken {
+	if _, err := signer.Parse(tokenString); !errors.Is(err, ErrInvalidToken) {
 		t.Errorf("Parse() of none-alg token error = %v, want %v", err, ErrInvalidToken)
 	}
 }

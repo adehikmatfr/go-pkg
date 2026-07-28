@@ -21,7 +21,7 @@ func TestNewAppliesPoolSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	stats := db.Stats()
 	if stats.MaxOpenConnections != 10 {

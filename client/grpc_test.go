@@ -5,13 +5,14 @@ import (
 	"testing"
 
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
 type noopClientTracer struct{}
 
 func (noopClientTracer) Start(ctx context.Context, spanName string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
-	return trace.NewNoopTracerProvider().Tracer("test").Start(ctx, spanName, opts...)
+	return noop.NewTracerProvider().Tracer("test").Start(ctx, spanName, opts...)
 }
 
 func (noopClientTracer) Close() {}
@@ -64,5 +65,5 @@ func TestNewClientDoesNotDialEagerly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient() error: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 }

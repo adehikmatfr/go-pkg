@@ -8,12 +8,13 @@ import (
 	"github.com/IBM/sarama"
 	"github.com/IBM/sarama/mocks"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 type noopTracer struct{}
 
 func (noopTracer) Start(ctx context.Context, spanName string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
-	return trace.NewNoopTracerProvider().Tracer("test").Start(ctx, spanName, opts...)
+	return noop.NewTracerProvider().Tracer("test").Start(ctx, spanName, opts...)
 }
 
 func (noopTracer) Close() {}
