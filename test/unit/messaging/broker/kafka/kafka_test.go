@@ -86,18 +86,6 @@ func (f *fakeSession) MarkMessage(msg *sarama.ConsumerMessage, metadata string) 
 }
 func (f *fakeSession) Context() context.Context { return context.Background() }
 
-func waitForCalls(t *testing.T, calls *int32, want int32) {
-	t.Helper()
-	deadline := time.After(time.Second)
-	for atomic.LoadInt32(calls) < want {
-		select {
-		case <-deadline:
-			t.Fatalf("Consume calls = %d, want >= %d within 1s", atomic.LoadInt32(calls), want)
-		case <-time.After(5 * time.Millisecond):
-		}
-	}
-}
-
 // TestListenToTopicProcessesMessagesThenStopsOnClosedConsumerGroup drives the
 // whole ListenToTopic/consumerGroupHandler flow through the sarama
 // interfaces: Setup/ConsumeClaim/Cleanup are all unexported internals,
@@ -112,6 +100,7 @@ func TestListenToTopicProcessesMessagesThenStopsOnClosedConsumerGroup(t *testing
 
 	var handled int32
 	var setupErr, claimErr, cleanupErr error
+	done := make(chan struct{})
 
 	cg := &fakeConsumerGroup{
 		onConsume: func(call int, handler sarama.ConsumerGroupHandler) error {
@@ -119,6 +108,7 @@ func TestListenToTopicProcessesMessagesThenStopsOnClosedConsumerGroup(t *testing
 				setupErr = handler.Setup(session)
 				claimErr = handler.ConsumeClaim(session, claim)
 				cleanupErr = handler.Cleanup(session)
+				close(done) // must happen after every write above, to establish happens-before with the <-done receive
 			}
 			return sarama.ErrClosedConsumerGroup
 		},
@@ -129,7 +119,11 @@ func TestListenToTopicProcessesMessagesThenStopsOnClosedConsumerGroup(t *testing
 		atomic.AddInt32(&handled, 1)
 	})
 
-	waitForCalls(t, &cg.calls, 1)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Consume was never invoked")
+	}
 	time.Sleep(20 * time.Millisecond) // give the loop a chance to over-call if it doesn't stop
 
 	if setupErr != nil {
