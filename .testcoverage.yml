@@ -1,0 +1,19 @@
+# Config for github.com/vladopajic/go-test-coverage (invoked via `make gotestcoverage`).
+# Rule: every file counted in the coverage profile must reach >= 70% coverage.
+profile: cover.out
+local-prefix: "github.com/adehikmatfr/go-pkg/v2"
+
+threshold:
+  # Minimum coverage percentage required for individual files. This repo is
+  # small and every package is meant to carry real tests (unlike a service
+  # with large untested usecase/resolver layers), so the per-file gate is a
+  # reasonable floor rather than a stand-in for "just don't regress."
+  file: 70
+  # package/total intentionally left at 0 (unenforced) — the per-file gate
+  # already catches a regression in any specific file; a package/total gate
+  # would just duplicate that signal in aggregate form.
+
+# Files/paths that are never fully unit-tested by design:
+exclude:
+  paths:
+    - ^test/mock/    # mockery-generated mocks — no logic, nothing to test

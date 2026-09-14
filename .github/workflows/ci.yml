@@ -17,29 +17,32 @@ jobs:
           check-latest: true
 
       - name: Download dependencies
-        run: go mod download
+        run: make deps
 
       - name: Verify go.mod/go.sum are tidy
-        run: |
-          go mod tidy
-          git diff --exit-code -- go.mod go.sum
+        run: make tidy-check
 
       - name: gofmt
-        run: |
-          diff=$(gofmt -l .)
-          if [ -n "$diff" ]; then
-            echo "The following files are not gofmt'ed:"
-            echo "$diff"
-            exit 1
-          fi
+        run: make fmt-check
 
       - name: go vet
-        run: go vet ./...
+        run: make vet
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
           version: latest
 
-      - name: go test
-        run: go test ./... -race -count=1
+      - name: go test (race)
+        run: make test-race
+
+      - name: Verify generated mocks are up to date
+        run: |
+          go install github.com/vektra/mockery/v2@v2.53.6
+          make mockery
+          git diff --exit-code -- test/mock
+
+      - name: Test coverage
+        run: |
+          go install github.com/vladopajic/go-test-coverage/v2@v2.19.0
+          make gotestcoverage

@@ -1,0 +1,19 @@
+with-expecter: true
+dir: "test/mock/{{.InterfaceDirRelative}}"
+outpkg: "{{.PackageName}}mock"
+filename: "{{.InterfaceNameSnake}}.go"
+mockname: "{{.InterfaceName}}"
+resolve-type-alias: false
+disable-version-string: true
+issue-845-fix: true
+
+packages:
+  github.com/adehikmatfr/go-pkg/v2/client/grpc:
+    interfaces:
+      ClientTracer:
+  github.com/adehikmatfr/go-pkg/v2/client/rest:
+    interfaces:
+      DefaultRest:
+  github.com/adehikmatfr/go-pkg/v2/messaging/broker/kafka:
+    interfaces:
+      Tracer:

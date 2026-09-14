@@ -6,6 +6,7 @@
 *.dylib
 *.test
 *.out
+cover.html
 
 # Go workspace / vendor
 /vendor/
@@ -14,4 +15,8 @@ go.work.sum
 
 # IDE
 .idea/
+.vscode/
 *.swp
+
+# AI assistant context (local-only, not shared via git)
+.assist/
