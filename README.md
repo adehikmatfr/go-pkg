@@ -46,8 +46,10 @@ go-pkg/
 │   ├── cache/                — PORT: Cache interface + ErrNotFound
 │   │   ├── redis/              ADAPTER: go-redis/v8
 │   │   └── memory/              ADAPTER: process-local map (dev/tests, no server needed)
-│   └── rdbms/                — PORT: shared Config (every adapter returns database/sql's own *sql.DB)
-│       └── postgres/           ADAPTER: lib/pq
+│   ├── rdbms/                — PORT: shared Config (every adapter returns database/sql's own *sql.DB)
+│   │   └── postgres/           ADAPTER: lib/pq
+│   └── storage/              — PORT: Storage interface (opaque ref, signed URL, KindPolicy, MIME sniffing) + sentinel errors
+│       └── gcs/                 ADAPTER: gocloud.dev/blob + gcsblob (Google Cloud Storage)
 ├── messaging/
 │   └── broker/                — PORT: Publisher/Consumer interfaces + Message
 │       └── kafka/               ADAPTER: IBM/sarama
@@ -58,8 +60,18 @@ go-pkg/
 │   └── fiber/                — pagination request + standard JSON response envelope for Fiber
 ├── ratelimit/               — PORT: token-bucket RateLimiter interface + ErrClosed
 │   └── memory/                ADAPTER: sethvargo/go-limiter, in-process
+├── notification/
+│   ├── email/                — PORT: EmailSender interface + EmailMessage/Address + sentinel errors
+│   │   ├── smtp/                ADAPTER: wneessen/go-mail
+│   │   └── memory/              ADAPTER: in-memory fake, records sends for tests
+│   ├── sms/                  — PORT: SmsSender interface + SmsMessage + sentinel errors
+│   │   └── twilio/              ADAPTER: twilio/twilio-go
+│   └── push/                 — PORT: PushSender interface + PushMessage + sentinel errors
+│       ├── fcm/                 ADAPTER: firebase.google.com/go/v4 (FCM)
+│       └── memory/              ADAPTER: in-memory fake, records sends for tests
 ├── structconvert/           — reflection-based struct-to-struct field copier (instance-based Converter)
-└── i18n/                    — locale resolution + a message Bundle (text/template placeholder interpolation)
+├── i18n/                    — locale resolution + a message Bundle (text/template placeholder interpolation)
+└── apperr/                  — error taxonomy: Registry maps domain sentinels to a stable Code + HTTP/gRPC status, without changing how domain code returns errors
 ```
 
 `client` and `parser` each split by protocol/framework, not by swappable backend — REST and gRPC are two different capabilities (not two implementations of the same one), so this is plain category nesting, not a port/adapter split.
@@ -74,6 +86,10 @@ Four categories split a **port** (the contract) from one or more **adapters** (c
 | SQL database | `datastore/rdbms` | `datastore/rdbms/postgres` |
 | Message broker | `messaging/broker` | `messaging/broker/kafka` |
 | Rate limiter | `ratelimit` | `ratelimit/memory` |
+| File/object storage | `datastore/storage` | `datastore/storage/gcs` |
+| Email notification | `notification/email` | `notification/email/smtp`, `notification/email/memory` |
+| SMS notification | `notification/sms` | `notification/sms/twilio` |
+| Push notification | `notification/push` | `notification/push/fcm`, `notification/push/memory` |
 
 Rules that keep this real instead of decorative:
 
@@ -236,6 +252,100 @@ resp.CreateResponse(user, "ok", nil)
 return fiberparser.ResponseJSON(c, resp)
 ```
 
+### storage / gcs (port / adapter)
+
+```go
+import (
+	"github.com/adehikmatfr/go-pkg/v2/datastore/storage"
+	"github.com/adehikmatfr/go-pkg/v2/datastore/storage/gcs"
+)
+
+fs, err := gcs.NewClient(ctx, gcs.Config{BucketName: "my-bucket"}, storage.Options{
+	Kinds: []storage.KindPolicy{
+		{Name: "avatar", AllowedContentTypes: []string{"image/png", "image/jpeg"}, MaxSize: 256 << 10},
+	},
+})
+defer fs.Close()
+
+intent, err := fs.CreateUploadIntent(ctx, "avatar", "image/png", 0)
+// client PUTs bytes to intent.SignedPutURL, then:
+obj, err := fs.ConfirmUpload(ctx, intent.StorageRef) // sniffs real bytes, never trusts the declared type
+url, err := fs.GetDownloadURL(ctx, obj.StorageRef, 15*time.Minute)
+```
+
+### email / smtp / memory (port / adapters)
+
+```go
+import (
+	"github.com/adehikmatfr/go-pkg/v2/notification/email"
+	"github.com/adehikmatfr/go-pkg/v2/notification/email/smtp"
+)
+
+sender, err := smtp.NewClient(smtp.Config{
+	Host:        "smtp.example.com",
+	Port:        587,
+	Auth:        smtp.AuthPlain,
+	Username:    "smtp-user",
+	Password:    "smtp-pass",
+	DefaultFrom: email.Address{Name: "MyApp", Email: "no-reply@example.com"},
+})
+
+msg := email.EmailMessage{
+	To:             []email.Address{{Email: "ada@example.com"}},
+	Subject:        "Welcome",
+	TextBody:       "Welcome aboard.",
+	IdempotencyKey: "signup-evt-7f3c", // stable per logical message; sent as Message-ID
+}
+err = sender.Send(ctx, msg)
+```
+
+Swap in `notification/email/memory` for tests — `memory.New()` returns a `*Sender` that also satisfies `email.EmailSender`, and records every send for assertion (`Sent()`, `Count()`, `Last()`, `FailWith` to inject a transport error).
+
+### sms / twilio (port / adapter)
+
+```go
+import (
+	"github.com/adehikmatfr/go-pkg/v2/notification/sms"
+	"github.com/adehikmatfr/go-pkg/v2/notification/sms/twilio"
+)
+
+sender, err := twilio.NewClient(twilio.Config{
+	AccountSID: os.Getenv("TWILIO_ACCOUNT_SID"),
+	AuthToken:  os.Getenv("TWILIO_AUTH_TOKEN"),
+	FromNumber: "+15017122661",
+})
+
+id, err := sender.Send(ctx, sms.SmsMessage{
+	To:             "+15558675310",
+	Body:           "Your code is 123456",
+	IdempotencyKey: "login-otp:" + sessionID,
+})
+// id is the provider's message SID (e.g. "SM...") on success.
+```
+
+### push / fcm / memory (port / adapters)
+
+```go
+import (
+	"github.com/adehikmatfr/go-pkg/v2/notification/push"
+	"github.com/adehikmatfr/go-pkg/v2/notification/push/fcm"
+)
+
+sender, err := fcm.NewClient(ctx, fcm.Config{ProjectID: "my-project"},
+	option.WithCredentialsFile("service-account.json"),
+)
+
+id, err := sender.Send(ctx, push.PushMessage{
+	Token:          deviceToken,
+	Title:          "Trade filled",
+	Body:           "Your AAPL order executed",
+	Priority:       push.PriorityHigh,
+	IdempotencyKey: eventID, // maps to the Android collapse key + apns-collapse-id
+})
+```
+
+Swap in `notification/push/memory` for tests — `memory.New()` returns a `*Sender` that also satisfies `push.PushSender`, recording every send (`Sent()`, `Len()`, `Reset()`, `IDFunc`/`Err` to script the result).
+
 ### ratelimit / memory (port / adapter)
 
 ```go
@@ -280,6 +390,22 @@ bundle.AddMessages("id", map[string]string{"greeting": "Halo, {{.Name}}!"})
 
 loc := i18n.ResolveLocale(acceptLanguageHeader, storedPreference, "en")
 text, err := bundle.Translate("greeting", loc, map[string]string{"Name": "Budi"})
+```
+
+### apperr
+
+```go
+var ErrUserNotFound = errors.New("user not found") // domain code returns this unchanged
+
+reg := apperr.NewRegistry().
+	Register(ErrUserNotFound, apperr.CodeNotFound)
+
+// at the boundary (HTTP handler, gRPC interceptor):
+resolved := reg.Resolve(err) // fails closed to apperr.CodeInternal if unregistered
+w.WriteHeader(apperr.HTTPStatus(resolved.Code))
+
+// optional: localize resolved.Key/resolved.Args with i18n.Bundle
+msg, err := bundle.Translate(resolved.Key, loc, resolved.Args) // e.g. "error.not_found"
 ```
 
 ## Conventions
