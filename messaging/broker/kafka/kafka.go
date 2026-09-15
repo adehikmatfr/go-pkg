@@ -28,7 +28,7 @@ type Config struct {
 }
 
 // New builds a broker.Consumer, eagerly connecting a consumer group and
-// producer to the configured brokers. Unlike sqldb/postgres.New, Sarama
+// producer to the configured brokers. Unlike rdbms/postgres.New, Sarama
 // dials brokers eagerly, so this call can fail — callers should be prepared
 // to run without a listener (e.g. log and continue) rather than block the
 // whole app from starting.

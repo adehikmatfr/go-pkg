@@ -3,12 +3,12 @@ package postgres_test
 import (
 	"testing"
 
-	"github.com/adehikmatfr/go-pkg/v2/datastore/sqldb"
-	"github.com/adehikmatfr/go-pkg/v2/datastore/sqldb/postgres"
+	"github.com/adehikmatfr/go-pkg/v2/datastore/rdbms"
+	"github.com/adehikmatfr/go-pkg/v2/datastore/rdbms/postgres"
 )
 
 func TestNewEmptyDSN(t *testing.T) {
-	if _, err := postgres.New(&sqldb.Config{}); err == nil {
+	if _, err := postgres.New(&rdbms.Config{}); err == nil {
 		t.Fatal("New() with empty DSN should return an error")
 	}
 }
@@ -16,7 +16,7 @@ func TestNewEmptyDSN(t *testing.T) {
 func TestNewAppliesPoolSettings(t *testing.T) {
 	// sql.Open only validates the DSN string; it doesn't dial the database,
 	// so this is safe to run without a live Postgres instance.
-	db, err := postgres.New(&sqldb.Config{
+	db, err := postgres.New(&rdbms.Config{
 		DSN:             "postgres://user:pass@localhost:5432/db?sslmode=disable",
 		MaxOpenConns:    10,
 		MaxIdleConns:    5,

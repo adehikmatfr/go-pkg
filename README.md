@@ -33,17 +33,20 @@ go-pkg/
 ├── go.mod
 ├── configuration/
 │   ├── env/                — read env vars (APP_ENV, bool/int helpers)
-│   └── config/              — load per-environment YAML/JSON config (github.com/kkyr/fig)
+│   ├── config/              — load per-environment YAML/JSON config (github.com/kkyr/fig)
+│   └── configstack/       — load layered YAML files + env-prefix overlay (github.com/knadh/koanf)
 ├── observability/
 │   ├── logger/              — global zerolog logger, split stdout/stderr by level
 │   └── tracer/              — OpenTelemetry TracerProvider (OTLP/HTTP), configurable sample ratio
 ├── security/
-│   └── jwt/                 — issue & parse HS256 JWTs (subject + role claim)
+│   ├── jwt/                 — issue & parse HS256 JWTs (subject + role claim)
+│   ├── rsajwt/             — issue & verify RS256 JWTs with JWKS-style key rotation (Actor, key sets)
+│   └── otp/                — RFC 6238/4226 TOTP/HOTP, numeric verification codes, TTL'd challenge store
 ├── datastore/
 │   ├── cache/                — PORT: Cache interface + ErrNotFound
 │   │   ├── redis/              ADAPTER: go-redis/v8
 │   │   └── memory/              ADAPTER: process-local map (dev/tests, no server needed)
-│   └── sqldb/                — PORT: shared Config (every adapter returns database/sql's own *sql.DB)
+│   └── rdbms/                — PORT: shared Config (every adapter returns database/sql's own *sql.DB)
 │       └── postgres/           ADAPTER: lib/pq
 ├── messaging/
 │   └── broker/                — PORT: Publisher/Consumer interfaces + Message
@@ -51,28 +54,33 @@ go-pkg/
 ├── client/
 │   ├── rest/                 — HTTP REST client (retry/backoff, proxy)
 │   └── grpc/                  — TLS-aware gRPC client dialer
-└── parser/
-    └── fiber/                — pagination request + standard JSON response envelope for Fiber
+├── parser/
+│   └── fiber/                — pagination request + standard JSON response envelope for Fiber
+├── ratelimit/               — PORT: token-bucket RateLimiter interface + ErrClosed
+│   └── memory/                ADAPTER: sethvargo/go-limiter, in-process
+├── structconvert/           — reflection-based struct-to-struct field copier (instance-based Converter)
+└── i18n/                    — locale resolution + a message Bundle (text/template placeholder interpolation)
 ```
 
 `client` and `parser` each split by protocol/framework, not by swappable backend — REST and gRPC are two different capabilities (not two implementations of the same one), so this is plain category nesting, not a port/adapter split.
 
 ## Ports & Adapters
 
-Three categories split a **port** (the contract) from one or more **adapters** (concrete backends), so a consumer can swap the backend by changing one constructor call — nothing else:
+Four categories split a **port** (the contract) from one or more **adapters** (concrete backends), so a consumer can swap the backend by changing one constructor call — nothing else:
 
 | Port | Package | Adapters |
 |------|---------|----------|
 | Cache | `datastore/cache` | `datastore/cache/redis`, `datastore/cache/memory` |
-| SQL database | `datastore/sqldb` | `datastore/sqldb/postgres` |
+| SQL database | `datastore/rdbms` | `datastore/rdbms/postgres` |
 | Message broker | `messaging/broker` | `messaging/broker/kafka` |
+| Rate limiter | `ratelimit` | `ratelimit/memory` |
 
 Rules that keep this real instead of decorative:
 
 - **The port package never imports a third-party client library.** `datastore/cache` and `messaging/broker` hold only interfaces, small data types, and sentinel errors — nothing that ties them to Redis, Kafka, or any other concrete technology.
 - **An adapter imports its port and a concrete client library**, and its constructor returns the port type (e.g. `cache.NewClient` returns `cache.Cache`, not a Redis-specific type).
-- **`datastore/sqldb` has no custom interface** — every SQL adapter already returns the standard library's `*sql.DB`, which is `database/sql`'s own port. Adding a second interface on top would only add indirection.
-- **Not every package needs this split.** `jwt` (one reasonable way to sign an HS256 token) and `client/rest`/`client/grpc` (each already backend-agnostic within its own protocol — there's no second "REST implementation" to swap in) stay as plain packages — see `.assist/skills/ports-and-adapters/SKILL.md` for the criteria used to decide.
+- **`datastore/rdbms` has no custom interface** — every SQL adapter already returns the standard library's `*sql.DB`, which is `database/sql`'s own port. Adding a second interface on top would only add indirection.
+- **Not every package needs this split.** `jwt`/`rsajwt` (each already the one reasonable way to do its trust model), `config`/`configstack`, `otp`, `structconvert`, `i18n`, and `client/rest`/`client/grpc` (each already backend-agnostic within its own protocol — there's no second "REST implementation" to swap in) stay as plain packages — see `.assist/skills/ports-and-adapters/SKILL.md` for the criteria used to decide.
 
 Swapping an adapter:
 
@@ -114,11 +122,32 @@ token, err := signer.Generate("user-123", "admin", 15*time.Minute)
 claims, err := signer.Parse(token)
 ```
 
+### rsajwt
+
+```go
+issuer, err := rsajwt.NewIssuer(rsajwt.IssuerConfig{
+	Issuer: "identity", Audience: []string{"internal"}, SigningKey: rsaPrivateKey, KeyID: "2026-01",
+})
+issued, err := issuer.Issue(rsajwt.Actor{ID: "user-123", Roles: []string{"admin"}})
+
+keys, err := rsajwt.NewStaticKeySet(rsajwt.KeySet{"2026-01": &rsaPrivateKey.PublicKey})
+verifier, err := rsajwt.NewVerifier(rsajwt.VerifierConfig{Issuer: "identity", Audience: "internal", Keys: keys})
+actor, err := verifier.Verify(ctx, issued.Token) // actor.HasRole("admin")
+```
+
 ### config
 
 ```go
 var cfg MyAppConfig
 err := config.NewConfig().ReadConfig(&cfg, "./config", "app") // loads app.<APP_ENV>.yaml
+```
+
+### configstack
+
+```go
+var cfg MyAppConfig
+loader := configstack.New(configstack.WithEnvPrefix("APP_")) // APP_DB__DSN -> db.dsn
+err := loader.Load(&cfg, "base.yaml", "production.yaml") // later files override earlier ones
 ```
 
 ### tracer
@@ -132,15 +161,15 @@ tr, err := tracer.New(&tracer.Config{
 defer tr.Close()
 ```
 
-### sqldb / postgres (port / adapter)
+### rdbms / postgres (port / adapter)
 
 ```go
 import (
-	"github.com/adehikmatfr/go-pkg/v2/datastore/sqldb"
-	"github.com/adehikmatfr/go-pkg/v2/datastore/sqldb/postgres"
+	"github.com/adehikmatfr/go-pkg/v2/datastore/rdbms"
+	"github.com/adehikmatfr/go-pkg/v2/datastore/rdbms/postgres"
 )
 
-db, err := postgres.New(&sqldb.Config{ // db is a plain *sql.DB — database/sql's own port
+db, err := postgres.New(&rdbms.Config{ // db is a plain *sql.DB — database/sql's own port
 	DSN:          os.Getenv("DATABASE_URL"),
 	MaxOpenConns: 20,
 	MaxIdleConns: 5,
@@ -205,6 +234,52 @@ err = c.GetObject(ctx, "user:1", &cached) // returns cache.ErrNotFound if missin
 resp := fiberparser.NewSingleResponse[User]()
 resp.CreateResponse(user, "ok", nil)
 return fiberparser.ResponseJSON(c, resp)
+```
+
+### ratelimit / memory (port / adapter)
+
+```go
+import (
+	"github.com/adehikmatfr/go-pkg/v2/ratelimit"
+	"github.com/adehikmatfr/go-pkg/v2/ratelimit/memory"
+)
+
+limiter, err := memory.New(ratelimit.Config{Tokens: 5, Interval: time.Minute})
+defer limiter.Close(ctx)
+
+allowed, retryAfter, err := limiter.Take(ctx, "user:123")
+if !allowed {
+	// respond 429, Retry-After: retryAfter
+}
+```
+
+### otp
+
+```go
+provisioner := otp.NewTOTPProvisioner(otp.TOTPParams{})
+secret, err := provisioner.Provision(ctx, "my-service", "user@example.com") // secret.URI -> QR code
+
+validator := otp.NewTOTPValidator(nil, otp.TOTPParams{})
+ok, err := validator.Validate(ctx, secret.Base32Secret, userSuppliedCode)
+```
+
+### structconvert
+
+```go
+c := structconvert.New()
+dto, err := structconvert.Convert[UserDTO](c, userModel) // matches fields by name
+dtos, err := structconvert.ConvertSlice[UserDTO](c, userModels)
+```
+
+### i18n
+
+```go
+bundle := i18n.NewBundle("en")
+bundle.AddMessages("en", map[string]string{"greeting": "Hello, {{.Name}}!"})
+bundle.AddMessages("id", map[string]string{"greeting": "Halo, {{.Name}}!"})
+
+loc := i18n.ResolveLocale(acceptLanguageHeader, storedPreference, "en")
+text, err := bundle.Translate("greeting", loc, map[string]string{"Name": "Budi"})
 ```
 
 ## Conventions

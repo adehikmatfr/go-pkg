@@ -20,3 +20,4 @@ go.work.sum
 
 # AI assistant context (local-only, not shared via git)
 .assist/
+.claude/
