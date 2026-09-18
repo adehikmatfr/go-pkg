@@ -1,0 +1,5 @@
+{
+  "flags": {
+    "trading.enabled": { "type": "integer", "value": 1 }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "flags": {
+    "trading.enabled": { "type": "boolean", "value": true },
+    "order.routing": { "type": "string", "value": "venue-a" },
+    "legacy.path": { "type": "boolean", "value": true, "disabled": true }
+  }
+}

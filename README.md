@@ -51,11 +51,15 @@ go-pkg/
 │   └── storage/              — PORT: Storage interface (opaque ref, signed URL, KindPolicy, MIME sniffing) + sentinel errors
 │       └── gcs/                 ADAPTER: gocloud.dev/blob + gcsblob (Google Cloud Storage)
 ├── messaging/
-│   └── broker/                — PORT: Publisher/Consumer interfaces + Message
-│       └── kafka/               ADAPTER: IBM/sarama
+│   ├── broker/                — PORT: Publisher/Consumer interfaces + Message
+│   │   └── kafka/               ADAPTER: IBM/sarama
+│   └── outbox/                — PORT: transactional-outbox Store + Event + a vendor-agnostic Relay (drains through messaging/broker.Publisher)
+│       ├── postgres/            ADAPTER: lib/pq-compatible *sql.DB, claims rows via FOR UPDATE SKIP LOCKED
+│       └── memory/              ADAPTER: in-memory, for tests/dev
 ├── client/
 │   ├── rest/                 — HTTP REST client (retry/backoff, proxy)
-│   └── grpc/                  — TLS-aware gRPC client dialer
+│   ├── grpc/                  — TLS-aware gRPC client dialer
+│   └── resilience/            — builds a resilient http.RoundTripper (retry, circuit breaker, per-attempt timeout) via failsafe-go; plug it into any *http.Client
 ├── parser/
 │   └── fiber/                — pagination request + standard JSON response envelope for Fiber
 ├── ratelimit/               — PORT: token-bucket RateLimiter interface + ErrClosed
@@ -66,9 +70,21 @@ go-pkg/
 │   │   └── memory/              ADAPTER: in-memory fake, records sends for tests
 │   ├── sms/                  — PORT: SmsSender interface + SmsMessage + sentinel errors
 │   │   └── twilio/              ADAPTER: twilio/twilio-go
-│   └── push/                 — PORT: PushSender interface + PushMessage + sentinel errors
-│       ├── fcm/                 ADAPTER: firebase.google.com/go/v4 (FCM)
-│       └── memory/              ADAPTER: in-memory fake, records sends for tests
+│   ├── push/                 — PORT: PushSender interface + PushMessage + sentinel errors
+│   │   ├── fcm/                 ADAPTER: firebase.google.com/go/v4 (FCM)
+│   │   └── memory/              ADAPTER: in-memory fake, records sends for tests
+│   └── dispatch/             — orchestrates email/sms/push: resolves preferences, renders content, fans out, records a delivery log. Plain package (no port/adapter split)
+├── featureflag/             — PORT: FlagEvaluator interface (fail-safe Bool/StringFlag) + EvaluationContext
+│   └── openfeature/            ADAPTER: open-feature/go-sdk (file-backed provider included, any other OpenFeature provider works too)
+├── audit/                   — PORT: AuditStore interface + AuditEvent + hash-chain helpers (tamper-evident, append-only)
+│   └── memory/                 ADAPTER: in-memory, concurrency-safe, for tests/dev
+├── scheduler/
+│   ├── cron/                 — PORT: recurring-job Cron interface + Locker/Unlocker + a shared crontab Schedule parser
+│   │   ├── gocron/              ADAPTER: go-co-op/gocron/v2 (production, real wall-clock ticking)
+│   │   └── memory/              ADAPTER: deterministic, clock-driven (tests/dev, no goroutine)
+│   └── queue/                — PORT: durable background-job JobEnqueuer/HandlerRegistry interfaces + Job + SQLTx seam
+│       ├── river/                ADAPTER: riverqueue/river over database/sql (production, durable/retryable)
+│       └── memory/               ADAPTER: in-memory, records sends for tests
 ├── structconvert/           — reflection-based struct-to-struct field copier (instance-based Converter)
 ├── i18n/                    — locale resolution + a message Bundle (text/template placeholder interpolation)
 └── apperr/                  — error taxonomy: Registry maps domain sentinels to a stable Code + HTTP/gRPC status, without changing how domain code returns errors
@@ -90,6 +106,11 @@ Four categories split a **port** (the contract) from one or more **adapters** (c
 | Email notification | `notification/email` | `notification/email/smtp`, `notification/email/memory` |
 | SMS notification | `notification/sms` | `notification/sms/twilio` |
 | Push notification | `notification/push` | `notification/push/fcm`, `notification/push/memory` |
+| Feature flag | `featureflag` | `featureflag/openfeature` |
+| Audit trail | `audit` | `audit/memory` |
+| Recurring cron scheduling | `scheduler/cron` | `scheduler/cron/gocron`, `scheduler/cron/memory` |
+| Durable job queue | `scheduler/queue` | `scheduler/queue/river`, `scheduler/queue/memory` |
+| Transactional outbox | `messaging/outbox` | `messaging/outbox/postgres`, `messaging/outbox/memory` |
 
 Rules that keep this real instead of decorative:
 
@@ -210,6 +231,26 @@ import ourgrpc "github.com/adehikmatfr/go-pkg/v2/client/grpc" // aliased: collid
 
 c := ourgrpc.NewGRPCClient(&ourgrpc.GRPCOpts{Cfg: &ourgrpc.GrpcConfig{Host: "svc", Port: 9090, TLS: true}, Tracer: tr})
 conn, err := c.NewClient(ctx)
+```
+
+### client/resilience
+
+Retry (exponential backoff), a consecutive-failure circuit breaker, and a per-attempt timeout for outbound HTTP — plug the resulting `http.RoundTripper` into any `*http.Client`:
+
+```go
+import "github.com/adehikmatfr/go-pkg/v2/client/resilience"
+
+rt, err := resilience.New(nil, resilience.Config{ // nil base uses http.DefaultTransport
+	MaxRetries:       3,
+	FailureThreshold: 5,
+	Timeout:          10 * time.Second,
+})
+httpClient := &http.Client{Transport: rt}
+
+resp, err := httpClient.Get("https://api.partner.example.com/v1/orders")
+if resilience.IsCircuitOpen(err) {
+	// fail fast — the partner has been unhealthy for FailureThreshold consecutive calls
+}
 ```
 
 ### broker / kafka (port / adapter)
@@ -345,6 +386,151 @@ id, err := sender.Send(ctx, push.PushMessage{
 ```
 
 Swap in `notification/push/memory` for tests — `memory.New()` returns a `*Sender` that also satisfies `push.PushSender`, recording every send (`Sent()`, `Len()`, `Reset()`, `IDFunc`/`Err` to script the result).
+
+### notification/dispatch (plain package)
+
+Fans one logical notification out to every channel a recipient has enabled, wiring the `email`/`sms`/`push` senders above. The caller supplies a `Renderer` (template lookup), a `PreferenceResolver` (which channels the recipient wants) and a `DeliveryLog` (append-only audit trail + idempotency store) — `dispatch` has no opinion on how those are persisted:
+
+```go
+import "github.com/adehikmatfr/go-pkg/v2/notification/dispatch"
+
+d, err := dispatch.NewDispatcher(
+	dispatch.Senders{Email: emailSender, SMS: smsSender, Push: pushSender},
+	myPreferenceResolver,
+	myRenderer,
+	myDeliveryLog,
+)
+
+result, err := d.Dispatch(ctx, dispatch.NotificationRequest{
+	Recipient:      dispatch.Recipient{ID: "user-1", Email: "user@example.com", Phone: "+15558675310"},
+	TemplateKey:    "order.filled",
+	Data:           map[string]any{"symbol": "AAPL"},
+	IdempotencyKey: "order-filled:" + orderID,
+})
+// One channel failing does not stop the others — result.Delivered/Failed/Skipped
+// report the outcome per channel, and err joins every channel failure.
+// Suppressed is true, err is nil, when (Recipient.ID, IdempotencyKey) was already delivered.
+```
+
+### featureflag / openfeature (port / adapter)
+
+```go
+import (
+	"github.com/adehikmatfr/go-pkg/v2/featureflag"
+	"github.com/adehikmatfr/go-pkg/v2/featureflag/openfeature"
+)
+
+evaluator, err := openfeature.NewFileBackedFlags(openfeature.Config{}, "flags.json")
+defer evaluator.Close(ctx)
+
+// Flags act as kill-switches: pass the conservative value as def. Any
+// backend error, timeout, or panic returns def — BoolFlag/StringFlag never
+// return an error or panic.
+if evaluator.BoolFlag(ctx, "trading.killswitch", false, featureflag.EvaluationContext{
+	ActorID: userID,
+	Tier:    "gold",
+}) {
+	return ErrTradingSuspended
+}
+```
+
+Wire in any other `openfeature.FeatureProvider` (LaunchDarkly, Flagsmith, GO Feature Flag, ...) via `openfeature.New(openfeature.Config{Provider: yourProvider})` instead of the file-backed one.
+
+### audit / memory (port / adapter)
+
+```go
+import (
+	"github.com/adehikmatfr/go-pkg/v2/audit"
+	"github.com/adehikmatfr/go-pkg/v2/audit/memory"
+)
+
+store := memory.New()
+
+rowHash, err := store.Append(ctx, store.Tail(), audit.AuditEvent{
+	ID:     eventID, // idempotency key: re-appending the same ID is a no-op
+	Source: "/orders",
+	Type:   "tech.example.order.placed",
+	Data:   map[string]any{"orderRef": orderID}, // references/hashes only, never PII or secrets
+})
+
+// VerifyChain recomputes every row hash and detects a later edit, reorder,
+// or deletion — pass nil to verify the store's own current chain.
+err = store.VerifyChain(ctx, nil)
+```
+
+### scheduler/cron / gocron / memory (port / adapters)
+
+```go
+import (
+	"github.com/adehikmatfr/go-pkg/v2/scheduler/cron"
+	"github.com/adehikmatfr/go-pkg/v2/scheduler/cron/gocron"
+)
+
+c, err := gocron.New(gocron.Config{Locker: cron.NewInMemoryLocker()})
+err = c.Register("*/5 * * * *", "settlement.reconcile", func(ctx context.Context) error {
+	return reconcileSettlements(ctx)
+})
+err = c.Start(ctx)
+defer c.Stop(ctx)
+```
+
+Swap in `scheduler/cron/memory` for tests — `memory.New(clock)` is driven by an injected `Clock` and an explicit `Advance(ctx)` call instead of wall-clock timers, so recurring logic is deterministic and fast.
+
+### scheduler/queue / river / memory (port / adapters)
+
+```go
+import (
+	"github.com/adehikmatfr/go-pkg/v2/scheduler/queue"
+	"github.com/adehikmatfr/go-pkg/v2/scheduler/queue/river"
+)
+
+enqueuer, err := river.New(river.Config{DB: db, Queues: map[string]int{"default": 10}})
+err = enqueuer.RegisterHandler("email_send", func(ctx context.Context, raw []byte) error {
+	var args EmailSendArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return err
+	}
+	return sendEmail(ctx, args)
+})
+
+// EnqueueTx makes the job durable iff the surrounding transaction commits.
+tx, _ := db.BeginTx(ctx, nil)
+_, err = enqueuer.EnqueueTx(ctx, queue.NewSQLTx(tx), queue.NewJob(
+	EmailSendArgs{To: "user@example.com"},
+	queue.WithIdempotencyKey("welcome-email:"+userID),
+))
+// ... other writes on tx ...
+tx.Commit() // job becomes durable here; rollback discards it
+```
+
+Swap in `scheduler/queue/memory` for tests — `memory.New()` records every enqueue (`Jobs()`, `VisibleJobs()`) and `memory.NewTx()` is a `queue.Tx` that fires commit/rollback callbacks without a database, so `EnqueueTx`'s atomic-visibility contract is testable end-to-end.
+
+### messaging/outbox / postgres / memory (port / adapters)
+
+The transactional outbox pattern: `Add` writes the event row in the same `*sql.Tx` as the business change, so "the change happened" and "the event was recorded" can never disagree. `Relay.Drain` then delivers pending rows through a `messaging/broker.Publisher`, with retry backoff and a dead-letter ceiling — call `Drain` from whatever recurring driver you already have (a ticker, `scheduler/cron`, a cron job); the package owns no scheduling of its own.
+
+```go
+import (
+	"github.com/adehikmatfr/go-pkg/v2/messaging/outbox"
+	"github.com/adehikmatfr/go-pkg/v2/messaging/outbox/postgres"
+)
+
+store, err := postgres.New(postgres.Config{DB: db}) // provision the table yourself — see the package doc comment for the DDL
+
+tx, _ := db.BeginTx(ctx, nil)
+err = store.Add(ctx, outbox.NewSQLTx(tx), outbox.Event{
+	ID:      eventID,
+	Topic:   "orders.placed",
+	Payload: payload,
+})
+// ... other writes on tx ...
+tx.Commit() // event becomes durable here; rollback discards it
+
+relay, err := outbox.NewRelay(outbox.Config{Store: store, Publisher: kafkaPublisher})
+result, err := relay.Drain(ctx, 100) // one batch; call this from your own cron/ticker
+```
+
+Swap in `messaging/outbox/memory` for tests — `memory.New()` records every added event and `memory.NewTx()` is an `outbox.Tx` that fires commit/rollback callbacks without a database, so `Relay.Drain`'s claim/retry/dead-letter logic is testable end-to-end.
 
 ### ratelimit / memory (port / adapter)
 

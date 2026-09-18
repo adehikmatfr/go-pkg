@@ -1,0 +1,6 @@
+{
+  "flags": {
+    "trading.enabled": { "type": "boolean", "value": true }
+  },
+  "unexpected": "field"
+}
