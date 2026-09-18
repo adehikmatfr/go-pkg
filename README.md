@@ -37,11 +37,15 @@ go-pkg/
 │   └── configstack/       — load layered YAML files + env-prefix overlay (github.com/knadh/koanf)
 ├── observability/
 │   ├── logger/              — global zerolog logger, split stdout/stderr by level
-│   └── tracer/              — OpenTelemetry TracerProvider (OTLP/HTTP), configurable sample ratio
+│   ├── tracer/              — OpenTelemetry TracerProvider (OTLP/HTTP), configurable sample ratio
+│   ├── redact/              — regex-based PII/secret censoring for log lines + a fail-closed io.Writer wrapper
+│   └── metrics/              — PORT: Recorder interface (counters/gauges/histograms) + Labels
+│       └── otel/                ADAPTER: OpenTelemetry metrics via OTLP/HTTP (same transport as tracer)
 ├── security/
 │   ├── jwt/                 — issue & parse HS256 JWTs (subject + role claim)
 │   ├── rsajwt/             — issue & verify RS256 JWTs with JWKS-style key rotation (Actor, key sets)
-│   └── otp/                — RFC 6238/4226 TOTP/HOTP, numeric verification codes, TTL'd challenge store
+│   ├── otp/                — RFC 6238/4226 TOTP/HOTP, numeric verification codes, TTL'd challenge store
+│   └── authmiddleware/    — HTTP middleware + gRPC unary interceptor validating a security/jwt bearer token
 ├── datastore/
 │   ├── cache/                — PORT: Cache interface + ErrNotFound
 │   │   ├── redis/              ADAPTER: go-redis/v8
@@ -111,6 +115,7 @@ Four categories split a **port** (the contract) from one or more **adapters** (c
 | Recurring cron scheduling | `scheduler/cron` | `scheduler/cron/gocron`, `scheduler/cron/memory` |
 | Durable job queue | `scheduler/queue` | `scheduler/queue/river`, `scheduler/queue/memory` |
 | Transactional outbox | `messaging/outbox` | `messaging/outbox/postgres`, `messaging/outbox/memory` |
+| Metrics | `observability/metrics` | `observability/metrics/otel` |
 
 Rules that keep this real instead of decorative:
 
@@ -172,6 +177,30 @@ verifier, err := rsajwt.NewVerifier(rsajwt.VerifierConfig{Issuer: "identity", Au
 actor, err := verifier.Verify(ctx, issued.Token) // actor.HasRole("admin")
 ```
 
+### authmiddleware
+
+HTTP middleware and a gRPC unary interceptor that validate a `security/jwt` bearer token and inject its `*jwt.Claims` into the request context:
+
+```go
+import (
+	"github.com/adehikmatfr/go-pkg/v2/security/authmiddleware"
+	"github.com/adehikmatfr/go-pkg/v2/security/jwt"
+)
+
+signer, _ := jwt.NewSigner(os.Getenv("JWT_SECRET"))
+
+// net/http
+handler := authmiddleware.HTTP(signer)(myHandler)
+
+// gRPC
+srv := grpc.NewServer(grpc.UnaryInterceptor(authmiddleware.UnaryServerInterceptor(signer)))
+```
+
+```go
+// Inside a handler/RPC reached past the middleware:
+claims, ok := authmiddleware.ClaimsFromContext(ctx)
+```
+
 ### config
 
 ```go
@@ -196,6 +225,25 @@ tr, err := tracer.New(&tracer.Config{
 	SampleRatio: 0.1, // sample 10% of traces in production
 })
 defer tr.Close()
+```
+
+### metrics / otel (port / adapter)
+
+```go
+import (
+	"github.com/adehikmatfr/go-pkg/v2/observability/metrics"
+	metricsotel "github.com/adehikmatfr/go-pkg/v2/observability/metrics/otel"
+)
+
+var rec metrics.Recorder
+rec, err := metricsotel.New(metricsotel.Config{
+	EndpointURL: "otel-collector:4318",
+	ServiceName: "my-service",
+})
+defer rec.Close()
+
+rec.IncCounter(ctx, "orders_placed_total", metrics.Labels{"market": "BTC-IDR"})
+rec.ObserveHistogram(ctx, "order_latency_seconds", time.Since(start).Seconds(), nil)
 ```
 
 ### rdbms / postgres (port / adapter)
